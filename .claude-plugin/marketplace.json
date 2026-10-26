@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "api-test-pilot",
+  "owner": {
+    "name": "sunghyuny",
+    "url": "https://github.com/sunghyuny"
+  },
+  "plugins": [
+    {
+      "name": "api-test-pilot",
+      "description": "OpenAPI spec-driven API testing: auto-generate test cases, call the API, validate responses, and detect breaking changes.",
+      "source": "./",
+      "category": "development"
+    }
+  ],
+  "description": "OpenAPI-based API test automation for Claude Code"
+}

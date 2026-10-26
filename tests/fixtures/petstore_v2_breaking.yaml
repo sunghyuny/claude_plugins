@@ -1,0 +1,103 @@
+# petstore_v1.yaml 대비 의도적으로 넣은 변경:
+#   breaking    : GET /owners 삭제, getPet의 petId 타입 integer→string,
+#                 listPets에 필수 파라미터 'region' 추가, Pet.tag 응답 필드 삭제,
+#                 status enum에서 'sold' 삭제, NewPet에 필수 필드 'species' 추가
+#   non-breaking: GET /stores 추가, listPets 응답 Pet에 'age' 필드 추가
+openapi: 3.0.3
+info:
+  title: Mini Petstore
+  version: 2.0.0
+servers:
+  - url: http://api.test/v2
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      tags: [pets]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1 }
+        - name: status
+          in: query
+          required: true
+          schema: { type: string, enum: [available] }
+        - name: region
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Pet" }
+        "400": { description: Bad request }
+    post:
+      operationId: createPet
+      tags: [pets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewPet" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pet" }
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      tags: [pets]
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pet" }
+        "404": { description: Not found }
+  /pets/{petId}/photo:
+    post:
+      operationId: uploadPhoto
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200": { description: OK }
+  /stores:
+    get:
+      operationId: listStores
+      responses:
+        "200": { description: OK }
+components:
+  schemas:
+    NewPet:
+      type: object
+      required: [name, species]
+      properties:
+        name: { type: string, example: Tom }
+        species: { type: string }
+    Pet:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        age: { type: integer }
+        status: { type: string, enum: [available] }

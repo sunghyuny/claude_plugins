@@ -1,0 +1,40 @@
+{
+  "description": "api-test-pilot: validate OpenAPI spec edits, warn on breaking changes, and summarize the last test run",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --quiet --project \"${CLAUDE_PLUGIN_ROOT}/server\" python \"${CLAUDE_PLUGIN_ROOT}/scripts/on_spec_edit.py\" pre",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --quiet --project \"${CLAUDE_PLUGIN_ROOT}/server\" python \"${CLAUDE_PLUGIN_ROOT}/scripts/on_spec_edit.py\" post",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --quiet --project \"${CLAUDE_PLUGIN_ROOT}/server\" python \"${CLAUDE_PLUGIN_ROOT}/scripts/on_stop.py\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

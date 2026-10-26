@@ -1,0 +1,102 @@
+openapi: 3.0.3
+info:
+  title: Mini Petstore
+  version: 1.0.0
+servers:
+  - url: http://api.test/v1
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      tags: [pets]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1 }
+        - name: status
+          in: query
+          required: true
+          schema: { type: string, enum: [available, sold] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Pet" }
+        "400": { description: Bad request }
+    post:
+      operationId: createPet
+      tags: [pets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewPet" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pet" }
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      tags: [pets]
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema: { type: integer, example: 7 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pet" }
+        "404": { description: Not found }
+  /pets/{petId}/photo:
+    post:
+      operationId: uploadPhoto
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200": { description: OK }
+  /owners:
+    get:
+      operationId: listOwners
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
+components:
+  schemas:
+    NewPet:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, example: Tom }
+        tag: { type: string, nullable: true }
+    Pet:
+      allOf:
+        - $ref: "#/components/schemas/NewPet"
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        tag: { type: string, nullable: true }
+        status: { type: string, enum: [available, sold] }

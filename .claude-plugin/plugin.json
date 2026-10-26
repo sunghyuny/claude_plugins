@@ -1,0 +1,19 @@
+{
+  "name": "api-test-pilot",
+  "version": "0.1.0",
+  "description": "OpenAPI spec-driven API testing: load a spec (URL or file), auto-generate test cases, call the API, validate responses against schemas, and detect breaking changes between spec versions.",
+  "keywords": [
+    "openapi",
+    "swagger",
+    "api-testing",
+    "mcp",
+    "fastapi",
+    "breaking-change"
+  ],
+  "author": {
+    "name": "sunghyuny",
+    "url": "https://github.com/sunghyuny"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/sunghyuny/claude_plugins"
+}
