@@ -21,11 +21,11 @@ FastAPI, Spring(springdoc), NestJS(@nestjs/swagger), Django(drf-spectacular)처�
 
 | 도구 | 설명 |
 |---|---|
-| `load_spec` | URL/파일에서 스펙 로드 (OpenAPI 3.x, Swagger 2.0 / JSON, YAML) |
+| `load_spec` | URL/파일에서 스펙 로드 (OpenAPI 3.x, Swagger 2.0 / JSON, YAML). 보호된 스펙 URL은 `spec_headers`로 |
 | `list_endpoints` | method, path, operationId, 파라미터, 응답 코드 목록 |
 | `generate_cases` | happy / not_found / invalid_type / missing_required / unauthorized 케이스 생성(기본은 읽기 요청만). 케이스는 서버가 보관하고 한 줄 요약만 반환 |
 | `get_cases` | 보관 중인 케이스의 전체 내용 조회 (필요한 id만) |
-| `run_cases` | 보관 중인 케이스를 `case_ids`로 골라 실행(`overrides`로 값 수정). 상태 코드와 응답 스키마를 검증하고, 실패 위주로 압축해서 반환. 스냅샷 자동 저장, `export_pytest=true`면 pytest 파일과 리포트 경로까지 한 번에 처리 |
+| `run_cases` | 보관 중인 케이스를 `case_ids`로 골라 실행(`overrides`로 값 수정). 상태 코드와 응답 스키마를 검증하고, 실패 위주로 압축해서 반환. 스냅샷 자동 저장, `export_pytest=true`면 pytest 파일과 리포트 경로까지 한 번에 처리. `concurrency`로 동시 실행, 헤더의 `${VAR}`는 환경변수 값으로 |
 | `call_endpoint` | 임의 요청 1회 (실제 id 조회 등) |
 | `diff_specs` | breaking / non-breaking 변경 분류 (`old`에 `snapshot`을 넣으면 마지막 스냅샷과 비교) |
 | `save_snapshot` | 현재 스펙을 비교 기준으로 저장 |
@@ -70,7 +70,13 @@ claude --plugin-dir ./claude_plugins
 생성된 pytest 파일은 플러그인 없이도 실행됩니다.
 ```bash
 API_BASE_URL=http://localhost:8000 pytest tests/generated/
+# 인증이 필요하면 공통 헤더를 JSON으로 넘깁니다. 값의 ${VAR}는 환경변수로 바뀝니다
+API_HEADERS='{"Authorization": "Bearer ${API_TOKEN}"}' pytest tests/generated/
 ```
+
+**인증 토큰은 환경변수로 넘깁니다.** 토큰을 대화에 직접 쓰면 도구 인자로 대화 기록에 남습니다. 대신 Claude Code를 실행하는 셸에서 `export API_TOKEN=...`(또는 settings.json의 `env`)으로 설정하고, Claude에게는 "토큰은 `API_TOKEN` 환경변수에 있어"라고만 알려 주세요. 플러그인이 헤더 값의 `${API_TOKEN}`을 실제 값으로 채웁니다. 결과와 curl 재현 명령에는 `${API_TOKEN}` 또는 `***`로만 표시됩니다. 스펙 URL(`/openapi.json`) 자체가 인증을 요구할 때도 같은 방식을 씁니다.
+
+**큰 스펙은 동시 실행으로 빠르게 돌립니다.** `run_cases`의 `concurrency`(최대 16)를 쓰면 읽기 요청을 동시에 보냅니다. 쓰기 요청은 항상 순서대로 보내고, 앞의 요청이 모두 끝난 뒤에 실행합니다. `/api-test`는 케이스가 20건 이상이면 8로 실행합니다.
 
 ### 2. 스펙 비교
 ```
@@ -82,6 +88,7 @@ API_BASE_URL=http://localhost:8000 pytest tests/generated/
 Claude가 `openapi.yaml` 같은 스펙 파일을 편집하면 자동으로 다음이 실행됩니다.
 - 구조가 깨지면(필수 필드 누락, 해석할 수 없는 `$ref` 등) Claude에게 바로 알려서 고치게 합니다.
 - 스냅샷(없으면 편집 직전 내용)과 비교해서 breaking change가 생기면 경고합니다. 같은 breaking change는 한 번만 알리고, 이후 편집에서는 새로 생긴 것만 알립니다.
+- 스펙이 아닌 파일(`.json`/`.yaml`/`.yml`이 아닌 파일)은 셸에서 먼저 걸러서 파이썬을 띄우지 않습니다. 그래서 일반 편집에는 거의 지연이 없습니다.
 
 ```
 ⚠️ api-test-pilot: openapi.yaml에서 breaking change 2건 감지 (편집 전 대비)
@@ -105,6 +112,10 @@ Claude가 `openapi.yaml` 같은 스펙 파일을 편집하면 자동으로 다�
 - 인증하지 않은 상태에서는 401/403을 돌려주거나 로그인 페이지로 리다이렉트하면 정상 차단으로 봅니다. Spring Security나 세션 기반 서버가 로그인 페이지로 보냅니다.
 - 인증이 필요한 케이스가 리다이렉트를 따라가 로그인 페이지에 도착하면, 200이어도 **실패**로 봅니다.
 - 401/403으로 실패하거나 로그인 페이지로 간 케이스에는 `auth_issue`로 원인(인증 정보 없음 / 보냈는데 거부됨)을 표시합니다.
+
+**응답 검증**
+- 상태 코드와 응답 JSON 스키마를 검사합니다.
+- 스키마의 `format`(date-time, date, email, uuid, uri 등)도 검사합니다. `int64`처럼 검사 방법이 없는 format은 통과로 봅니다.
 
 **결과 표시**
 - 결과의 `url`은 query까지 포함한 실제 요청 URL입니다. query로 보낸 API 키는 `***`로 가립니다.

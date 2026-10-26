@@ -6,13 +6,14 @@ import json
 import re
 import shlex
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import quote, urlencode
 
 import httpx
 from jsonschema import Draft202012Validator
 
-from .spec import Spec, SpecError, to_json_schema
+from .spec import Spec, SpecError, expand_env, to_json_schema
 
 MAX_BODY_PREVIEW = 500
 MAX_CALL_BODY = 4000  # call_endpoint는 실제 id를 찾는 데 쓰이므로 조금 더 넉넉하게
@@ -35,7 +36,8 @@ def validate_body(schema: dict[str, Any] | None, body: Any) -> list[str]:
     """응답 body를 스키마로 검증해서 오류 메시지 목록을 돌려준다."""
     if not schema:
         return []
-    validator = Draft202012Validator(to_json_schema(schema))
+    # format(date-time, date, email, uuid, uri 등)도 검사한다. 모르는 format(int32 등)은 그냥 통과
+    validator = Draft202012Validator(to_json_schema(schema), format_checker=Draft202012Validator.FORMAT_CHECKER)
     try:
         found = sorted(validator.iter_errors(body), key=lambda e: [str(p) for p in e.absolute_path])
     except Exception:  # 스펙 쪽 스키마가 잘못된 경우 검증 자체를 건너뛴다 (테스트 실패로 치지 않음)
@@ -74,7 +76,9 @@ def run_case(
     shared = headers or {}
     if unauthenticated:  # unauthorized 케이스: 인증 헤더만 빼고 나머지 공통 헤더는 유지
         shared = {k: v for k, v in shared.items() if k.lower() not in auth_names}
-    req_headers = {**shared, **(case.get("headers") or {})}
+    # shown_headers는 ${NAME} 참조가 그대로 남은 값(재현 명령 표시용), req_headers는 실제로 보내는 값
+    shown_headers = {**shared, **(case.get("headers") or {})}
+    req_headers = expand_env(shown_headers)
     kwargs: dict[str, Any] = {"params": case.get("query") or None, "headers": req_headers}
     if case.get("body") is not None:
         kwargs["json"] = case["body"]
@@ -107,7 +111,7 @@ def run_case(
         resp = client.send(request, follow_redirects=not unauthenticated)
     except httpx.HTTPError as e:
         result.update(passed=False, status=None, error=f"요청 실패: {type(e).__name__}: {e}", schema_errors=[],
-                      reproduce=to_curl(request, shown_url, req_headers, case.get("body"), auth_names))
+                      reproduce=to_curl(request, shown_url, shown_headers, case.get("body"), auth_names))
         return result
     result["elapsed_ms"] = round((time.perf_counter() - started) * 1000)
     result["status"] = resp.status_code
@@ -148,7 +152,7 @@ def run_case(
     result["passed"] = status_ok and not schema_errors
     if not result["passed"]:
         result["response_preview"] = _preview(body, is_json)
-        result["reproduce"] = to_curl(request, shown_url, req_headers, case.get("body"), auth_names,
+        result["reproduce"] = to_curl(request, shown_url, shown_headers, case.get("body"), auth_names,
                                       follow=bool(resp.history))
         if not unauthenticated and (resp.status_code in (401, 403) or login_redirect):
             # 서버 버그가 아니라 인증 설정 문제일 가능성이 높다. 원인을 따로 표시해서 실패 진단을 돕는다
@@ -240,11 +244,34 @@ def run_cases(
     headers: dict[str, str] | None = None,
     timeout: float = 10.0,
     client: httpx.Client | None = None,
+    concurrency: int = 1,
 ) -> dict[str, Any]:
+    """concurrency > 1이면 연속된 읽기 요청을 묶어서 동시에 보낸다.
+    쓰기 요청(POST/PUT/PATCH/DELETE)은 경계로 삼아 혼자 순서대로 보낸다: 앞의 쓰기가 끝난 뒤에 뒤의 읽기가
+    실행되므로 '만들고 조회' 같은 순서 의존이 깨지지 않는다. 결과 순서는 항상 입력 순서와 같다."""
+    workers = max(1, min(int(concurrency or 1), MAX_CONCURRENCY))
     own_client = client is None
     client = client or httpx.Client(timeout=timeout, follow_redirects=True)
+    results: list[dict[str, Any] | None] = [None] * len(cases)
+
+    def run(i: int) -> None:
+        results[i] = _safe_run_case(spec, cases[i], base_url, client, headers)
+
     try:
-        results = [_safe_run_case(spec, c, base_url, client, headers) for c in cases]
+        if workers == 1:
+            for i in range(len(cases)):
+                run(i)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                batch: list[int] = []
+                for i, case in enumerate(cases):
+                    if _is_write(case):
+                        list(pool.map(run, batch))  # 앞의 읽기를 모두 끝낸 뒤
+                        batch = []
+                        run(i)                      # 쓰기는 혼자 실행
+                    else:
+                        batch.append(i)
+                list(pool.map(run, batch))
     finally:
         if own_client:
             client.close()
@@ -260,6 +287,14 @@ def run_cases(
         "auth_issues": sum(1 for r in results if r.get("auth_issue")),
         "results": results,
     }
+
+
+MAX_CONCURRENCY = 16
+WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _is_write(case: Any) -> bool:
+    return not isinstance(case, dict) or str(case.get("method", "")).upper() in WRITE_METHODS
 
 
 MAX_LISTED_PASSED = 100
@@ -315,7 +350,7 @@ def call_endpoint(
     timeout: float = 10.0,
 ) -> dict[str, Any]:
     with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-        kwargs: dict[str, Any] = {"params": query, "headers": headers}
+        kwargs: dict[str, Any] = {"params": query, "headers": expand_env(headers)}
         if body is not None:
             kwargs["json"] = body
         resp = client.request(method.upper(), url, **kwargs)

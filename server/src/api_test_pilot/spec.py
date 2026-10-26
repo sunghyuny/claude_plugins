@@ -9,6 +9,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,11 +30,27 @@ def is_url(source: str) -> bool:
     return source.startswith(("http://", "https://"))
 
 
-def read_source(source: str, timeout: float = 15.0) -> str:
-    """URL이나 파일 경로에서 스펙 원문을 읽는다."""
+ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def expand_env(headers: dict[str, Any] | None) -> dict[str, str]:
+    """헤더 값의 ${NAME}을 MCP 서버 프로세스의 환경변수 값으로 바꾼다.
+    토큰을 도구 인자에 직접 쓰지 않게 하기 위함 (도구 인자는 대화 기록에 남는다).
+    없는 변수가 하나라도 있으면 요청을 보내지 않도록 SpecError를 낸다."""
+    if not headers:
+        return {}
+    missing = sorted({name for v in headers.values() for name in ENV_REF.findall(str(v)) if name not in os.environ})
+    if missing:
+        raise SpecError(f"환경변수가 설정되지 않았습니다: {', '.join(missing)} "
+                        "(Claude Code를 실행하는 셸에 export 하거나 settings.json의 env에 넣으세요)")
+    return {k: ENV_REF.sub(lambda m: os.environ[m.group(1)], str(v)) for k, v in headers.items()}
+
+
+def read_source(source: str, timeout: float = 15.0, headers: dict[str, str] | None = None) -> str:
+    """URL이나 파일 경로에서 스펙 원문을 읽는다. headers는 보호된 스펙 URL용(${NAME} 참조 가능)."""
     if is_url(source):
         try:
-            resp = httpx.get(source, timeout=timeout, follow_redirects=True)
+            resp = httpx.get(source, timeout=timeout, follow_redirects=True, headers=expand_env(headers))
             resp.raise_for_status()
         except httpx.HTTPError as e:
             raise SpecError(f"스펙을 내려받지 못했습니다: {source} ({e})") from e
@@ -238,8 +256,8 @@ class Spec:
         self.operations = self._build_operations()
 
     @classmethod
-    def load(cls, source: str) -> "Spec":
-        raw = parse_text(read_source(source))
+    def load(cls, source: str, headers: dict[str, str] | None = None) -> "Spec":
+        raw = parse_text(read_source(source, headers=headers))
         if is_url(source):
             src = source
         else:

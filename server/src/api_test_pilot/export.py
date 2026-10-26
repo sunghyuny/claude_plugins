@@ -17,6 +17,8 @@ TEMPLATE = '''r"""{title} API 테스트 — api-test-pilot이 자동 생성함.
 
 스펙: {source}
 실행: API_BASE_URL={base_url} pytest {filename}
+인증: API_HEADERS='{{"Authorization": "Bearer ${{API_TOKEN}}"}}' 처럼 JSON으로 공통 헤더를 넘긴다.
+      값의 $VAR / ${{VAR}}는 환경변수로 바뀐다. 인증 없이 보내는 케이스(unauthorized)에서는 인증 헤더만 빠진다.
 """
 
 import json
@@ -33,6 +35,8 @@ except ImportError:  # jsonschema가 없으면 상태 코드만 검사한다
     Draft202012Validator = None
 
 BASE_URL = os.environ.get("API_BASE_URL", {base_url_literal}).rstrip("/")
+EXTRA_HEADERS = {{k: os.path.expandvars(str(v)) for k, v in json.loads(os.environ.get("API_HEADERS") or "{{}}").items()}}
+AUTH_HEADER_NAMES = {auth_header_names}
 REDIRECT_STATUSES = {{301, 302, 303, 307, 308}}
 LOGIN_PATH = re.compile({login_pattern}, re.IGNORECASE)
 
@@ -58,10 +62,11 @@ def client():
 def test_api(client, case):
     if case.get("skip"):
         pytest.skip(case["skip"])
-    kwargs = {{"params": case["query"] or None, "headers": case["headers"] or None}}
+    unauthenticated = case.get("auth") is False
+    shared = {{k: v for k, v in EXTRA_HEADERS.items() if not (unauthenticated and k.lower() in AUTH_HEADER_NAMES)}}
+    kwargs = {{"params": case["query"] or None, "headers": {{**shared, **case["headers"]}} or None}}
     if case["body"] is not None:
         kwargs["json"] = case["body"]
-    unauthenticated = case.get("auth") is False
     resp = client.request(case["method"], _url(case), follow_redirects=not unauthenticated, **kwargs)
 
     # 인증 없이 보낸 요청이 로그인 페이지로 리다이렉트되면 정상 차단으로 본다
@@ -83,7 +88,7 @@ def test_api(client, case):
         assert schema.get("type") not in ("object", "array"), "응답이 JSON이 아닙니다 (스펙은 JSON 스키마를 정의함)"
         return
     errors = [f"{{'/'.join(map(str, e.absolute_path)) or '(root)'}}: {{e.message}}"
-              for e in Draft202012Validator(schema).iter_errors(body)]
+              for e in Draft202012Validator(schema, format_checker=Draft202012Validator.FORMAT_CHECKER).iter_errors(body)]
     assert not errors, "응답 스키마 불일치:\\n" + "\\n".join(errors[:10])
 
 
@@ -151,4 +156,5 @@ def render_pytest(spec: Spec, cases: list[dict[str, Any]], base_url: str, filena
         filename=filename or default_filename(spec),
         cases_json=cases_json,
         login_pattern=repr(LOGIN_PATH.pattern),
+        auth_header_names="{" + ", ".join(repr(n) for n in sorted(spec.auth_header_names())) + "}",
     )

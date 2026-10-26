@@ -12,7 +12,7 @@ from mcp.server.mcpserver import MCPServer
 from . import cases as cases_mod
 from . import diff as diff_mod
 from . import export, runner, store
-from .spec import Spec, SpecError, unsupported_refs, validate_structure
+from .spec import Spec, SpecError, expand_env, unsupported_refs, validate_structure
 
 mcp = MCPServer(
     "api-test-pilot",
@@ -33,13 +33,14 @@ _specs: dict[str, Spec] = {}
 _cases: dict[str, dict[str, dict[str, Any]]] = {}  # spec_id -> {case_id: case}
 
 
-def _get(spec: str) -> Spec:
+def _get(spec: str, headers: dict[str, str] | None = None) -> Spec:
     """spec_id면 캐시에서, 아니면 URL/경로로 보고 새로 로드한다.
-    MCP 서버가 재시작돼 캐시가 비었으면 저장해 둔 케이스 파일의 source로 다시 읽는다."""
+    MCP 서버가 재시작돼 캐시가 비었으면 저장해 둔 케이스 파일의 source로 다시 읽는다.
+    headers는 보호된 스펙 URL을 받을 때만 쓴다(토큰 대신 ${NAME} 참조를 권장)."""
     if spec in _specs:
         return _specs[spec]
     saved = store.load_cases(spec) if SPEC_ID.fullmatch(spec) else None
-    loaded = Spec.load(saved["source"] if saved else spec)
+    loaded = Spec.load(saved["source"] if saved else spec, headers=headers)
     _specs[loaded.id] = loaded
     return loaded
 
@@ -75,14 +76,15 @@ def _select(s: Spec, case_ids: list[str] | None) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def load_spec(source: str) -> dict[str, Any]:
+def load_spec(source: str, spec_headers: dict[str, str] | None = None) -> dict[str, Any]:
     """OpenAPI/Swagger 스펙을 URL이나 파일 경로에서 로드한다.
 
     FastAPI 서버라면 http://localhost:8000/openapi.json 처럼 넘기면 된다.
+    spec_headers: 스펙 URL이 인증을 요구할 때의 헤더. 값에 ${NAME}을 쓰면 환경변수에서 채운다.
     반환: spec_id, title, version, endpoint_count, base_urls(테스트 대상 URL 후보), 구조 경고.
     """
     try:
-        spec = Spec.load(source)
+        spec = Spec.load(source, headers=spec_headers)
     except SpecError as e:
         return _error(e)
     _specs[spec.id] = spec
@@ -106,6 +108,7 @@ def generate_cases(
     operation_id: str | None = None,
     tag: str | None = None,
     include_writes: bool = False,
+    spec_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """테스트 케이스를 생성해서 서버에 보관하고, 한 줄 요약만 돌려준다.
 
@@ -115,9 +118,10 @@ def generate_cases(
     다시 호출하면 이 스펙의 보관 케이스를 새로 만든 것으로 바꾼다.
     값을 고치려면 run_cases의 overrides를 쓰고, body 등 전체 내용이 필요할 때만 get_cases를 부른다.
     spec에 URL/파일 경로를 바로 넣어도 된다. 결과의 spec(제목, base_urls, 구조 경고)이 load_spec을 대신한다.
+    spec_headers: 스펙 URL이 인증을 요구할 때의 헤더. 값에 ${NAME}을 쓰면 환경변수에서 채운다.
     """
     try:
-        s = _get(spec)
+        s = _get(spec, spec_headers)
         result = cases_mod.generate_cases(s, operation_id, tag, include_writes)
     except SpecError as e:
         return _error(e)
@@ -160,6 +164,7 @@ def run_cases(
     timeout: float = 10.0,
     export_pytest: bool = False,
     output_path: str | None = None,
+    concurrency: int = 1,
 ) -> dict[str, Any]:
     """보관 중인 케이스를 실제 서버에 호출하고 상태 코드와 응답 스키마를 검증한다.
     실행이 끝나면 스펙 스냅샷을 자동으로 저장한다(save_snapshot을 따로 부를 필요 없음).
@@ -168,12 +173,15 @@ def run_cases(
     case_ids: 실행할 케이스 id 목록. 생략하면 보관 중인 전체.
     overrides: {case_id: {바꿀 부분}}. path_params/query/headers는 키 단위로 합치고 body/expected_status는 바꾼다.
       예: {"getPet:happy": {"path_params": {"petId": 10}}}. 바꾼 값은 저장되어 export_pytest에도 쓰인다.
-    headers: 모든 케이스에 붙일 공통 헤더(예: {"Authorization": "Bearer ..."}).
+    headers: 모든 케이스에 붙일 공통 헤더. 토큰은 값에 직접 쓰지 말고 ${NAME}으로 환경변수를 참조한다
+      (예: {"Authorization": "Bearer ${API_TOKEN}"}). 도구 인자는 대화 기록에 남기 때문이다.
       unauthorized 케이스에는 인증 헤더를 빼고 보낸다. 401/403·로그인 리다이렉트 실패에는 auth_issue가 붙는다.
+    concurrency: 동시에 보낼 요청 수(1~16, 기본 1). 읽기 요청에만 적용하고 쓰기 요청은 항상 순서대로 보낸다.
     반환: 집계, 실패한 케이스의 상세(failures), 통과 목록(passed_cases: 'id → 상태'), 전체 결과 파일 경로.
     케이스 하나가 잘못돼도 전체가 멈추지 않고 그 케이스만 error로 기록한다.
     """
     try:
+        expand_env(headers)  # 없는 환경변수가 있으면 요청을 하나도 보내기 전에 알린다
         s = _get(spec)
         if overrides:
             stored = _stored(s)
@@ -186,7 +194,7 @@ def run_cases(
         selected = _select(s, case_ids)
     except (SpecError, ValueError) as e:
         return _error(e)
-    summary = runner.run_cases(s, selected, base_url, headers=headers, timeout=timeout)
+    summary = runner.run_cases(s, selected, base_url, headers=headers, timeout=timeout, concurrency=concurrency)
     results_file = snapshot = None
     try:
         store.save_last_run(summary)
@@ -213,7 +221,8 @@ def call_endpoint(
     body: Any = None,
     headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """임의의 URL을 한 번 호출해서 상태 코드와 응답을 돌려준다 (수동 확인용)."""
+    """임의의 URL을 한 번 호출해서 상태 코드와 응답을 돌려준다 (수동 확인용).
+    headers 값의 ${NAME}은 환경변수에서 채운다."""
     try:
         return runner.call_endpoint(method, url, query, body, headers)
     except Exception as e:
